@@ -5,8 +5,7 @@ plugin "aws" {
 }
 
 config {
-  # Scan all modules recursively
-  module = true
+  call_module_type = "all"
 }
 
 rule "terraform_deprecated_interpolation" { enabled = true }
