@@ -74,7 +74,6 @@ jobs:
       - name: terraform fmt (check)
         id: fmt
         run: terraform fmt -check -recursive -diff
-        continue-on-error: true   # report in PR comment, don't hard-fail yet
 
       - name: terraform init (no backend)
         run: |
@@ -84,7 +83,7 @@ jobs:
 
       - name: terraform validate
         id: validate
-        run: terraform validate -no-color
+        run: terraform validate
 
       # ── TFLint ─────────────────────────────────────────────────────────────
       - name: Setup TFLint
@@ -98,8 +97,6 @@ jobs:
       - name: TFLint run
         id: tflint
         run: tflint --format compact --recursive
-        continue-on-error: true
-
       # ── Trivy (IaC security scan) ──────────────────────────────────────────
       - name: Run Trivy IaC scan
         uses: aquasecurity/trivy-action@master
@@ -110,15 +107,11 @@ jobs:
           output: "trivy-results.sarif"
           severity: "CRITICAL,HIGH"
           exit-code: "1"
-        continue-on-error: true   # report but don't block on first run
-
       - name: Upload Trivy SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: "trivy-results.sarif"
-        continue-on-error: true   # SARIF upload can fail on private repos without GHAS
-
       # ── PR comment with fmt / validate / lint results ─────────────────────
       - name: Post validation summary to PR
         uses: actions/github-script@v7
@@ -199,8 +192,6 @@ jobs:
             -no-color \
             -out=tfplan \
             -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
-        continue-on-error: true   # capture output even on failure
-
       - name: Post plan to PR
         uses: actions/github-script@v7
         if: github.event_name == 'pull_request'
