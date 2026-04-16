@@ -4,10 +4,6 @@ plugin "aws" {
   source  = "github.com/terraform-linters/tflint-ruleset-aws"
 }
 
-config {
-  call_module_type = "all"
-}
-
 rule "terraform_deprecated_interpolation" { enabled = true }
 rule "terraform_documented_outputs"       { enabled = true }
 rule "terraform_documented_variables"     { enabled = true }
