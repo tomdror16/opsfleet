@@ -1,0 +1,65 @@
+# examples/spot-preferred-deployment.yaml
+#
+# Demonstrates a more flexible scheduling policy:
+#   • Prefers Graviton Spot nodes (best price/performance)
+#   • Falls back to x86 Spot if no arm64 capacity is available
+#   • Only uses On-Demand as a last resort via the NodePool weight system
+#
+# This works because both "x86" and "arm64" NodePools accept Spot and
+# On-Demand capacity types.  Karpenter will pick the cheapest option that
+# satisfies all requirements.
+#
+# Note: Your container image MUST be a multi-arch manifest list to run on
+# both amd64 and arm64.  The nginx:stable-alpine image qualifies.
+#
+# Apply with:
+#   kubectl apply -f examples/spot-preferred-deployment.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-multiarch
+  namespace: default
+  labels:
+    app: nginx-multiarch
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: nginx-multiarch
+  template:
+    metadata:
+      labels:
+        app: nginx-multiarch
+    spec:
+      # Allow scheduling on both architectures – Karpenter picks the cheapest
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            # Strongly prefer Graviton (weight 80/100)
+            - weight: 80
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values: ["arm64"]
+            # Prefer Spot over On-Demand (weight 100/100)
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: karpenter.sh/capacity-type
+                    operator: In
+                    values: ["spot"]
+
+      containers:
+        - name: nginx
+          image: nginx:stable-alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

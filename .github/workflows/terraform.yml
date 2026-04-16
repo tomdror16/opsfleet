@@ -1,0 +1,370 @@
+name: "Terraform — EKS Infrastructure"
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+
+  # Allow manual runs (e.g. to force a re-apply after an AWS console change)
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to run"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+# ── Concurrency: prevent two applies running simultaneously ───────────────────
+concurrency:
+  group: "terraform-${{ github.ref }}"
+  cancel-in-progress: false   # don't cancel — queue and wait
+
+# ── Permissions for OIDC token exchange (keyless AWS auth) ───────────────────
+permissions:
+  id-token: write    # required for OIDC
+  contents: read
+  pull-requests: write  # allows the plan step to comment on PRs
+
+env:
+  TF_VERSION:        "1.9.8"
+  TFLINT_VERSION:    "0.55.0"
+  TRIVY_VERSION:     "0.58.0"
+  WORKING_DIR:       "./terraform"
+  AWS_REGION:        "eu-west-1"
+  # The OIDC role must trust this repo's Actions workflow (see docs/pipeline-setup.md)
+  AWS_ROLE_ARN:      ${{ secrets.AWS_OIDC_ROLE_ARN }}
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1: fmt + validate + lint + security scan
+  # Runs on every push and every PR — fast feedback, no AWS credentials needed.
+  # ────────────────────────────────────────────────────────────────────────────
+  validate:
+    name: "Validate"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Terraform ──────────────────────────────────────────────────────────
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: terraform fmt (check)
+        id: fmt
+        run: terraform fmt -check -recursive -diff
+        continue-on-error: true   # report in PR comment, don't hard-fail yet
+
+      - name: terraform init (no backend)
+        run: |
+          terraform init \
+            -backend=false \
+            -input=false
+
+      - name: terraform validate
+        id: validate
+        run: terraform validate -no-color
+
+      # ── TFLint ─────────────────────────────────────────────────────────────
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v${{ env.TFLINT_VERSION }}
+
+      - name: TFLint init
+        run: tflint --init
+
+      - name: TFLint run
+        id: tflint
+        run: tflint --format compact --recursive
+        continue-on-error: true
+
+      # ── Trivy (IaC security scan) ──────────────────────────────────────────
+      - name: Run Trivy IaC scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "config"
+          scan-ref: ${{ env.WORKING_DIR }}
+          format: "sarif"
+          output: "trivy-results.sarif"
+          severity: "CRITICAL,HIGH"
+          exit-code: "1"
+        continue-on-error: true   # report but don't block on first run
+
+      - name: Upload Trivy SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+        continue-on-error: true   # SARIF upload can fail on private repos without GHAS
+
+      # ── PR comment with fmt / validate / lint results ─────────────────────
+      - name: Post validation summary to PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        env:
+          FMT_OUTCOME:      ${{ steps.fmt.outcome }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+          TFLINT_OUTCOME:   ${{ steps.tflint.outcome }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const icon = (s) => s === 'success' ? '✅' : s === 'skipped' ? '⏭️' : '❌';
+            const body = [
+              '## Terraform Validation Results',
+              `| Step | Result |`,
+              `|---|---|`,
+              `| \`terraform fmt\` | ${icon(process.env.FMT_OUTCOME)} ${process.env.FMT_OUTCOME} |`,
+              `| \`terraform validate\` | ${icon(process.env.VALIDATE_OUTCOME)} ${process.env.VALIDATE_OUTCOME} |`,
+              `| TFLint | ${icon(process.env.TFLINT_OUTCOME)} ${process.env.TFLINT_OUTCOME} |`,
+              '',
+              '_Trivy IaC scan results are in the Security tab._',
+            ].join('\n');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      # Hard-fail the job if fmt or validate failed
+      - name: Fail on fmt or validate errors
+        if: steps.fmt.outcome == 'failure' || steps.validate.outcome == 'failure'
+        run: |
+          echo "terraform fmt or validate failed. See output above."
+          exit 1
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Plan
+  # Runs on every PR. Requires AWS OIDC credentials to contact the backend
+  # and run a real plan against the remote state.
+  # ────────────────────────────────────────────────────────────────────────────
+  plan:
+    name: "Plan"
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          # Wrap output so the plan step can capture stdout/stderr cleanly
+          terraform_wrapper: true
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ env.AWS_ROLE_ARN }}
+          aws-region:        ${{ env.AWS_REGION }}
+          role-session-name: "github-actions-terraform-plan"
+
+      - name: terraform init
+        id: init
+        run: terraform init -input=false -no-color
+
+      - name: terraform plan
+        id: plan
+        run: |
+          terraform plan \
+            -input=false \
+            -no-color \
+            -out=tfplan \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
+        continue-on-error: true   # capture output even on failure
+
+      - name: Post plan to PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN_STDOUT: ${{ steps.plan.outputs.stdout }}
+          PLAN_STDERR: ${{ steps.plan.outputs.stderr }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const maxLen = 60000;
+            let plan = process.env.PLAN_STDOUT || process.env.PLAN_STDERR || '(no output)';
+            if (plan.length > maxLen) {
+              plan = plan.substring(0, maxLen) + '\n\n... (truncated — see Actions log for full output)';
+            }
+            const icon  = process.env.PLAN_OUTCOME === 'success' ? '✅' : '❌';
+            const body  = [
+              `## Terraform Plan ${icon}`,
+              '',
+              '<details><summary>Show Plan</summary>',
+              '',
+              '```hcl',
+              plan,
+              '```',
+              '',
+              '</details>',
+              '',
+              `*Workflow: \`${{ github.workflow }}\` · Actor: \`${{ github.actor }}\` · Run: [\`${{ github.run_id }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})*`,
+            ].join('\n');
+
+            // Delete previous plan comments to keep the PR clean
+            const comments = await github.rest.issues.listComments({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            for (const c of comments.data) {
+              if (c.body.startsWith('## Terraform Plan')) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: c.id,
+                });
+              }
+            }
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Fail on plan error
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      # Upload plan artifact so the apply job can reuse it
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        if: steps.plan.outcome == 'success'
+        with:
+          name: tfplan-${{ github.sha }}
+          path: ${{ env.WORKING_DIR }}/tfplan
+          retention-days: 5
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3: Apply
+  # Only runs on pushes to main (i.e. after a PR is merged).
+  # Downloads the plan artifact produced during the PR plan job if available,
+  # otherwise runs a fresh plan-then-apply.
+  # ────────────────────────────────────────────────────────────────────────────
+  apply:
+    name: "Apply"
+    runs-on: ubuntu-latest
+    needs: validate
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+    environment: production   # requires manual approval if configured in repo settings
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false   # wrapper interferes with apply exit codes
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ env.AWS_ROLE_ARN }}
+          aws-region:        ${{ env.AWS_REGION }}
+          role-session-name: "github-actions-terraform-apply"
+
+      - name: terraform init
+        run: terraform init -input=false -no-color
+
+      # Always run a fresh plan immediately before apply so that we apply exactly
+      # what is reviewed — the saved plan artifact from a PR run can be stale if
+      # other merges landed between the PR being opened and merged.
+      - name: terraform plan (pre-apply)
+        run: |
+          terraform plan \
+            -input=false \
+            -no-color \
+            -out=tfplan \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}"
+
+      - name: terraform apply
+        run: terraform apply -input=false -no-color -auto-approve tfplan
+
+      - name: Print useful outputs
+        if: success()
+        run: |
+          echo "=== Cluster access command ==="
+          terraform output -raw configure_kubectl
+          echo ""
+          echo "=== Grafana access ==="
+          terraform output grafana_access_command
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4: Destroy (manual workflow_dispatch only — never runs automatically)
+  # ────────────────────────────────────────────────────────────────────────────
+  destroy:
+    name: "Destroy"
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+    environment: production   # requires manual approval
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ env.AWS_ROLE_ARN }}
+          aws-region:        ${{ env.AWS_REGION }}
+          role-session-name: "github-actions-terraform-destroy"
+
+      - name: terraform init
+        run: terraform init -input=false -no-color
+
+      - name: terraform destroy
+        run: |
+          terraform destroy \
+            -input=false \
+            -auto-approve \
+            -no-color \
+            -var="grafana_admin_password=${{ secrets.GRAFANA_ADMIN_PASSWORD }}"

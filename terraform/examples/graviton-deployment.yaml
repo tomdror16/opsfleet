@@ -1,0 +1,62 @@
+# examples/graviton-deployment.yaml
+#
+# Deploys an nginx workload onto a Graviton (arm64) node provisioned by
+# Karpenter.  The nodeSelector targets arm64 instances; Karpenter will pick
+# from the Graviton families defined in the "arm64" NodePool (m8g, m7g, c8g,
+# c7g, r8g, r7g, t4g) using Spot first, On-Demand as fallback.
+#
+# Apply with:
+#   kubectl apply -f examples/graviton-deployment.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-graviton
+  namespace: default
+  labels:
+    app: nginx-graviton
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-graviton
+  template:
+    metadata:
+      labels:
+        app: nginx-graviton
+    spec:
+      # ── Architecture selector ──────────────────────────────────────────────
+      nodeSelector:
+        kubernetes.io/arch: arm64           # forces Graviton nodes
+
+      containers:
+        - name: nginx
+          image: nginx:stable-alpine        # multi-arch image (amd64 + arm64)
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-graviton
+  namespace: default
+spec:
+  selector:
+    app: nginx-graviton
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP

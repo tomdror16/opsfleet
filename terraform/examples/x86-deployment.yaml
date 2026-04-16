@@ -1,0 +1,70 @@
+# examples/x86-deployment.yaml
+#
+# Deploys an nginx workload onto an x86_64 node provisioned by Karpenter.
+#
+# The nodeSelector targets the "x86" NodePool via the standard
+# kubernetes.io/arch label.  Karpenter will launch an amd64 instance
+# (On-Demand or Spot, depending on availability) and schedule the pod there.
+#
+# Apply with:
+#   kubectl apply -f examples/x86-deployment.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-x86
+  namespace: default
+  labels:
+    app: nginx-x86
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-x86
+  template:
+    metadata:
+      labels:
+        app: nginx-x86
+    spec:
+      # ── Architecture selector ──────────────────────────────────────────────
+      nodeSelector:
+        kubernetes.io/arch: amd64          # forces x86_64 nodes
+
+      # ── Toleration (not strictly needed unless you add taints to the pool) ─
+      # tolerations:
+      #   - key: "node.kubernetes.io/arch"
+      #     operator: "Equal"
+      #     value: "amd64"
+      #     effect: "NoSchedule"
+
+      containers:
+        - name: nginx
+          image: nginx:stable-alpine          # multi-arch image (amd64 + arm64)
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-x86
+  namespace: default
+spec:
+  selector:
+    app: nginx-x86
+  ports:
+    - port: 80
+      targetPort: 80
+  type: ClusterIP

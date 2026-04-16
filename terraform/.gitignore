@@ -1,0 +1,35 @@
+# ── Terraform state & cache ───────────────────────────────────────────────────
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfstate.*.backup
+crash.log
+crash.*.log
+
+# ── Variable files that may contain secrets ───────────────────────────────────
+# terraform.tfvars IS intentionally gitignored.
+# Commit terraform.tfvars.example instead — it contains only safe placeholder values.
+terraform.tfvars
+*.auto.tfvars
+
+# ── Plan files (may contain sensitive values in plaintext) ────────────────────
+*.tfplan
+tfplan
+
+# ── Override files (local developer tweaks — should not be shared) ────────────
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ── Editor & OS noise ─────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Temporary files from scripts ──────────────────────────────────────────────
+scripts/*.log

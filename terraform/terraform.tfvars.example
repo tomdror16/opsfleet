@@ -1,0 +1,64 @@
+# terraform.tfvars.example
+#
+# Copy to terraform.tfvars and fill in the values for your environment.
+#
+# NEVER commit terraform.tfvars — it is listed in .gitignore.
+# NEVER put secret values (passwords, tokens, keys) in this file or any .tf file.
+# Secret values are written to AWS Secrets Manager via scripts/set-secret-values.ps1
+# after the first terraform apply.
+
+# ── Core ──────────────────────────────────────────────────────────────────────
+
+aws_region   = "eu-west-1"
+cluster_name = "startup-eks"
+
+# ── VPC ───────────────────────────────────────────────────────────────────────
+
+vpc_cidr             = "10.0.0.0/16"
+availability_zones   = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+private_subnet_cidrs = ["10.0.11.0/24", "10.0.12.0/24", "10.0.13.0/24"]
+
+# ── EKS ───────────────────────────────────────────────────────────────────────
+
+cluster_version = "1.35"
+
+# Graviton3 system nodes — cost-effective for CoreDNS/Karpenter/ESO.
+eks_managed_node_group_instance_types = ["m7g.medium", "m6g.medium"]
+eks_managed_node_group_min_size       = 2
+eks_managed_node_group_max_size       = 3
+eks_managed_node_group_desired_size   = 2
+
+# ── Karpenter ─────────────────────────────────────────────────────────────────
+
+karpenter_version   = "1.11.1"
+karpenter_namespace = "kube-system"
+
+# ── Monitoring ────────────────────────────────────────────────────────────────
+
+monitoring_namespace          = "monitoring"
+kube_prometheus_stack_version = "67.9.0"
+prometheus_retention          = "15d"
+prometheus_storage_size       = "50Gi"
+grafana_ingress_enabled       = false
+grafana_hostname               = "grafana.example.com"
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+# These two values have NO defaults and MUST be provided.
+
+# Name of the S3 bucket created by scripts/bootstrap-state-backend.ps1
+state_bucket_name = "REPLACE_WITH_YOUR_STATE_BUCKET"
+
+# ARN of the GitHub Actions OIDC IAM role (see docs/pipeline-setup.md)
+# e.g. "arn:aws:iam::123456789012:role/github-actions-terraform"
+ci_role_arn = "REPLACE_WITH_YOUR_CI_ROLE_ARN"
+
+eso_version = "0.14.4"
+
+# ── Tags ──────────────────────────────────────────────────────────────────────
+
+default_tags = {
+  Project     = "startup-eks"
+  ManagedBy   = "Terraform"
+  Environment = "poc"
+}
