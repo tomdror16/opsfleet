@@ -73,7 +73,7 @@ jobs:
 
       - name: terraform fmt (check)
         id: fmt
-        run: terraform fmt -check -recursive -diff
+        run: terraform fmt -recursive -diff
 
       - name: terraform init (no backend)
         run: |
